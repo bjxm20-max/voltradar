@@ -307,31 +307,42 @@ function onRadiusChange() {
   else if (userLat) fetchByRadius(userLat, userLng);
 }
 
-// ── Fetch ─────────────────────────────────────────────────────
+// ── Fetch (Overpass / OpenStreetMap) ──────────────────────────
+const OVERPASS = 'https://overpass-api.de/api/interpreter';
+
 async function fetchByRadius(lat, lng) {
   const r = document.getElementById('radiusSelect').value;
   if (r === 'pt')    { fetchPortugal(); return; }
   if (r === 'world') { fetchWorld(lat, lng); return; }
-  await doFetch(`https://api.openchargemap.io/v3/poi/?output=json&latitude=${lat}&longitude=${lng}&distance=${r}&distanceunit=KM&maxresults=500&compact=false&verbose=false`, lat, lng, `${r} km`);
+  const rm = parseFloat(r) * 1000;
+  const q = `[out:json][timeout:30];(node["amenity"="charging_station"](around:${rm},${lat},${lng});way["amenity"="charging_station"](around:${rm},${lat},${lng}););out body center qt;`;
+  await doFetch(q, lat, lng, `${r} km`);
 }
 
 async function fetchPortugal() {
   map.setView([39.5, -8.0], 7);
   const lat = userLat||39.5, lng = userLng||-8.0;
-  await doFetch(`https://api.openchargemap.io/v3/poi/?output=json&countrycode=PT&maxresults=500&compact=false&verbose=false`, lat, lng, 'Portugal 🇵🇹');
+  const q = `[out:json][timeout:60];area["ISO3166-1"="PT"][admin_level=2]->.pt;(node["amenity"="charging_station"](area.pt);way["amenity"="charging_station"](area.pt););out body center qt;`;
+  await doFetch(q, lat, lng, 'Portugal 🇵🇹');
 }
 
 async function fetchWorld(lat, lng) {
   map.setView([20, 0], 2);
-  await doFetch(`https://api.openchargemap.io/v3/poi/?output=json&latitude=${lat}&longitude=${lng}&distance=20000&distanceunit=KM&maxresults=500&compact=false&verbose=false`, lat, lng, 'Mundo 🌍');
+  const q = `[out:json][timeout:60];node["amenity"="charging_station"];out body 500;`;
+  await doFetch(q, lat, lng, 'Mundo 🌍');
 }
 
-async function doFetch(url, refLat, refLng, label) {
+async function doFetch(query, refLat, refLng, label) {
   setStatus('A carregar...'); showLoading();
   try {
-    const res = await fetch(url);
+    const res = await fetch(OVERPASS, {
+      method: 'POST',
+      body: 'data=' + encodeURIComponent(query)
+    });
     const data = await res.json();
-    allStations = data.map(s => enrichStation(s, refLat, refLng));
+    allStations = (data.elements || [])
+      .filter(e => e.type === 'node' || (e.type === 'way' && e.center))
+      .map(e => enrichStation(e, refLat, refLng));
     updateConnectorFilter();
     applyFilters();
     setStatus(`${allStations.length} estações — ${label}`);
@@ -339,30 +350,73 @@ async function doFetch(url, refLat, refLng, label) {
   } catch(e) { setStatus('Erro ao carregar. Tenta novamente.'); showError(); }
 }
 
-// ── Enrich ────────────────────────────────────────────────────
-function enrichStation(s, refLat, refLng) {
-  const lat = s.AddressInfo?.Latitude, lng = s.AddressInfo?.Longitude;
+// ── Enrich (OSM tags) ─────────────────────────────────────────
+const SOCKET_MAP = {
+  'socket:type2':             'Type 2 (AC)',
+  'socket:type2_combo':       'CCS Combo 2 (DC)',
+  'socket:chademo':           'CHAdeMO',
+  'socket:type1':             'Type 1 (AC)',
+  'socket:type2_cable':       'Type 2 Cabo',
+  'socket:tesla_supercharger':'Tesla Supercharger',
+  'socket:tesla_destination': 'Tesla Destination',
+  'socket:schuko':            'Schuko',
+  'socket:type3c':            'Type 3c',
+};
+
+function parseKw(str) {
+  if (!str) return 0;
+  const km = str.match(/([\d.]+)\s*[kK][wW]/); if (km) return parseFloat(km[1]);
+  const wm = str.match(/([\d.]+)\s*[wW]/);     if (wm) return parseFloat(wm[1]) / 1000;
+  return 0;
+}
+
+function enrichStation(e, refLat, refLng) {
+  const tags = e.tags || {};
+  const lat  = e.lat  ?? e.center?.lat;
+  const lng  = e.lon  ?? e.center?.lon;
   const distKm = (lat && lng) ? haversine(refLat, refLng, lat, lng) : 9999;
-  const connections = s.Connections || [];
-  const maxKw = connections.reduce((m, c) => Math.max(m, c.PowerKW||0), 0);
-  const connTypes = [...new Set(connections.map(c => c.ConnectionType?.Title).filter(Boolean))];
-  const sid = s.StatusType?.ID;
-  let statusLabel = 'Desconhecido', statusClass = 'badge-gray';
-  if (sid === 50)  { statusLabel = 'Operacional';            statusClass = 'badge-green'; }
-  if (sid === 200) { statusLabel = 'Fora de serviço';        statusClass = 'badge-red'; }
-  if (sid === 210) { statusLabel = 'Temp. fechado';          statusClass = 'badge-yellow'; }
-  if (sid === 100) { statusLabel = 'Sem informação';         statusClass = 'badge-gray'; }
+
+  // Connectors & power
+  const connTypes = [], connections = [];
+  Object.entries(SOCKET_MAP).forEach(([key, name]) => {
+    if (!tags[key] || tags[key] === 'no') return;
+    connTypes.push(name);
+    const qty = parseInt(tags[key]) || 1;
+    const kw  = parseKw(tags[key + ':output']);
+    connections.push({ ConnectionType: { Title: name }, Quantity: qty, PowerKW: kw || null });
+  });
+  let maxKw = connections.reduce((m, c) => Math.max(m, c.PowerKW||0), 0);
+  if (!maxKw) maxKw = parseKw(tags['maxpower:electric'] || tags['charging_station:output'] || '');
+
+  // Address
+  const street = tags['addr:street'] ? (tags['addr:street'] + (tags['addr:housenumber'] ? ' ' + tags['addr:housenumber'] : '')) : null;
+  const address = [street, tags['addr:city'], tags['addr:country']].filter(Boolean).join(', ');
+
+  // Status / access
+  let statusLabel = 'Público', statusClass = 'badge-green';
+  const acc = tags.access;
+  if (acc === 'private')   { statusLabel = 'Privado';   statusClass = 'badge-red'; }
+  else if (acc === 'customers') { statusLabel = 'Clientes'; statusClass = 'badge-yellow'; }
+  else if (acc === 'permissive') { statusLabel = 'Público'; statusClass = 'badge-green'; }
+
+  // Cost
+  let cost = null;
+  if (tags.fee === 'no') cost = 'Gratuito';
+  else if (tags.fee === 'yes') cost = tags.charge || 'Pago';
+
+  const numPoints = parseInt(tags.capacity) || connections.reduce((s, c) => s + (c.Quantity||1), 0) || 1;
+
   return {
-    id: s.ID,
-    name: s.AddressInfo?.Title || 'Sem nome',
-    address: [s.AddressInfo?.AddressLine1, s.AddressInfo?.Town, s.AddressInfo?.Country?.Title].filter(Boolean).join(', '),
+    id:   e.id,
+    name: tags.name || tags.operator || tags.brand || `Carregador #${e.id}`,
+    address,
     lat, lng, distKm, maxKw, connTypes, connections,
     statusLabel, statusClass,
-    cost: s.UsageCost || null,
-    operator: s.OperatorInfo?.Title || null,
-    numPoints: s.NumberOfPoints || connections.length,
-    phone: s.AddressInfo?.ContactTelephone1 || null,
-    url: s.AddressInfo?.RelatedURL || null
+    cost,
+    operator: tags.operator || tags.brand || null,
+    numPoints,
+    phone: tags.phone || tags['contact:phone'] || null,
+    url:   tags.website || tags['contact:website'] || null
   };
 }
 
