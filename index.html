@@ -317,6 +317,8 @@ window.addEventListener('orientationchange', () => setTimeout(() => map.invalida
 // No arranque: telemóvel começa em modo Mapa; desktop mostra tudo
 if (!isMobile()) document.body.classList.remove('show-map');
 setTimeout(() => map.invalidateSize(), 200);
+// Lembra a última pesquisa (se existir) e recarrega-a
+setTimeout(restoreLast, 250);
 
 // ── Theme ─────────────────────────────────────────────────────
 function toggleTheme() {
@@ -379,6 +381,30 @@ function onRadiusChange() {
   if (v === 'pt') fetchPortugal();
   else if (v === 'world') fetchWorld(userLat||39.5, userLng||-8.0);
   else if (userLat) fetchByRadius(userLat, userLng);
+}
+
+// ── Lembrar última pesquisa ───────────────────────────────────
+function saveLast() {
+  try {
+    localStorage.setItem('vr_lastLoc', JSON.stringify({
+      lat: userLat, lng: userLng,
+      q:   document.getElementById('searchInput').value,
+      r:   document.getElementById('radiusSelect').value
+    }));
+  } catch(e) {}
+}
+
+function restoreLast() {
+  let d;
+  try { d = JSON.parse(localStorage.getItem('vr_lastLoc') || 'null'); } catch(e) {}
+  if (!d || d.lat == null) return;
+  userLat = d.lat; userLng = d.lng;
+  if (d.q) document.getElementById('searchInput').value = d.q;
+  if (d.r) document.getElementById('radiusSelect').value = d.r;
+  placeUserMarker(userLat, userLng);
+  map.setView([userLat, userLng], 13);
+  setTimeout(() => map.invalidateSize(), 100);
+  fetchByRadius(userLat, userLng);
 }
 
 // ── Fetch (Overpass / OpenStreetMap) ──────────────────────────
@@ -456,6 +482,7 @@ async function doFetch(query, refLat, refLng, label) {
     updateConnectorFilter();
     applyFilters();
     setStatus(`${allStations.length} estações — ${label}`);
+    saveLast();
     checkHash();
   } catch(e) {
     setStatus('Servidor OSM ocupado — tenta novamente.');
@@ -672,6 +699,7 @@ function openDetail(s) {
       <div class="detail-row"><span>Distância</span><strong>${s.distKm<9999?s.distKm.toFixed(1)+' km':'—'}</strong></div>
     </div>
     ${s.connections.length?`<div class="detail-section"><h4>Conectores (${s.connections.length})</h4>${connectors}</div>`:''}
+    ${(s.lat&&s.lng)?`<a class="detail-link" href="https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}" target="_blank" rel="noopener">🧭 Abrir no Google Maps</a>`:''}
     ${s.url?`<a class="detail-link" href="${s.url}" target="_blank">🔗 Ver mais informação</a>`:''}`;
 }
 
