@@ -8,6 +8,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-title" content="VoltRadar"/>
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="apple-touch-icon" href="icon-192.png"/>
   <title>VoltRadar ⚡</title>
 
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
@@ -319,6 +321,13 @@ if (!isMobile()) document.body.classList.remove('show-map');
 setTimeout(() => map.invalidateSize(), 200);
 // Lembra a última pesquisa (se existir) e recarrega-a
 setTimeout(restoreLast, 250);
+
+// Regista o service worker — necessário para instalar como app (PWA)
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
 
 // ── Theme ─────────────────────────────────────────────────────
 function toggleTheme() {
